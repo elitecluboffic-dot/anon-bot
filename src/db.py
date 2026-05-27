@@ -306,3 +306,175 @@ def global_stats():
         return 0, 0
     finally:
         release(conn)
+
+
+# ── Report & Moderation ───────────────────────────────
+
+def add_report(reporter_id: int, reported_id: int, reason: str):
+    conn = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS reports (
+                id          SERIAL PRIMARY KEY,
+                reporter_id BIGINT NOT NULL,
+                reported_id BIGINT NOT NULL,
+                reason      TEXT,
+                status      TEXT DEFAULT 'pending',
+                created_at  TIMESTAMPTZ DEFAULT NOW()
+            );
+        """)
+        cur.execute("""
+            INSERT INTO reports (reporter_id, reported_id, reason)
+            VALUES (%s, %s, %s)
+        """, (reporter_id, reported_id, reason))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"add_report: {e}")
+    finally:
+        release(conn)
+
+
+def get_pending_reports():
+    conn = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            SELECT r.*, u.username as reported_username
+            FROM reports r
+            LEFT JOIN users u ON u.user_id = r.reported_id
+            WHERE r.status = 'pending'
+            ORDER BY r.created_at DESC
+        """)
+        return [dict(row) for row in cur.fetchall()]
+    except Exception as e:
+        logger.error(f"get_pending_reports: {e}")
+        return []
+    finally:
+        release(conn)
+
+
+def resolve_report(report_id: int):
+    conn = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("UPDATE reports SET status = 'resolved' WHERE id = %s", (report_id,))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"resolve_report: {e}")
+    finally:
+        release(conn)
+
+
+def add_warning(user_id: int) -> int:
+    """Tambah warning ke user, return jumlah warning sekarang."""
+    conn = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS warnings INTEGER DEFAULT 0;
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS ban_until TIMESTAMPTZ DEFAULT NULL;
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE;
+        """)
+        cur.execute("""
+            UPDATE users SET warnings = warnings + 1 WHERE user_id = %s
+            RETURNING warnings
+        """, (user_id,))
+        row = cur.fetchone()
+        conn.commit()
+        return row[0] if row else 0
+    except Exception as e:
+        logger.error(f"add_warning: {e}")
+        return 0
+    finally:
+        release(conn)
+
+
+def ban_user(user_id: int, until=None, permanent: bool = False):
+    """Ban user. until = datetime object untuk ban sementara, permanent = True untuk permanen."""
+    conn = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS ban_until TIMESTAMPTZ DEFAULT NULL;
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE;
+        """)
+        if permanent:
+            cur.execute("""
+                UPDATE users SET is_banned = TRUE, ban_until = NULL WHERE user_id = %s
+            """, (user_id,))
+        else:
+            cur.execute("""
+                UPDATE users SET is_banned = TRUE, ban_until = %s WHERE user_id = %s
+            """, (until, user_id))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"ban_user: {e}")
+    finally:
+        release(conn)
+
+
+def unban_user(user_id: int):
+    conn = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE users SET is_banned = FALSE, ban_until = NULL WHERE user_id = %s
+        """, (user_id,))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"unban_user: {e}")
+    finally:
+        release(conn)
+
+
+def is_banned(user_id: int) -> bool:
+    """Cek apakah user masih kena ban."""
+    conn = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            SELECT is_banned, ban_until FROM users WHERE user_id = %s
+        """, (user_id,))
+        row = cur.fetchone()
+        if not row:
+            return False
+        if not row["is_banned"]:
+            return False
+        # Cek apakah ban sementara sudah habis
+        if row["ban_until"] is not None:
+            from datetime import datetime, timezone
+            if datetime.now(timezone.utc) > row["ban_until"]:
+                unban_user(user_id)
+                return False
+        return True
+    except Exception as e:
+        logger.error(f"is_banned: {e}")
+        return False
+    finally:
+        release(conn)
+
+
+def get_user_modinfo(user_id: int):
+    conn = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            SELECT user_id, username, warnings, is_banned, ban_until, total_chats
+            FROM users WHERE user_id = %s
+        """, (user_id,))
+        row = cur.fetchone()
+        return dict(row) if row else None
+    except Exception as e:
+        logger.error(f"get_user_modinfo: {e}")
+        return None
+    finally:
+        release(conn)
