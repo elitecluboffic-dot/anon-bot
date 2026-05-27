@@ -9,10 +9,12 @@ from src.db import (
     upsert_user, get_user, set_status, update_profile, update_filters,
     set_invisible, set_premium, increment_chats,
     join_queue, leave_queue, pop_match, queue_count, global_stats,
+    check_premium_expiry,
 )
 
 logger = logging.getLogger(__name__)
-OWNER_ID = int(os.getenv("OWNER_ID", 0))
+OWNER_ID       = int(os.getenv("OWNER_ID", 0))
+OWNER_USERNAME = os.getenv("OWNER_USERNAME", "admin")  # tanpa @
 
 INTERESTS_LIST = ["music", "gaming", "anime", "sport", "film", "tech", "food", "travel", "art", "random"]
 
@@ -63,7 +65,6 @@ async def try_match(bot, user_id: int):
         parse_mode=ParseMode.MARKDOWN
     )
 
-    # Tombol laporkan muncul otomatis
     report_keyboard = InlineKeyboardMarkup([[
         InlineKeyboardButton("🚨 Laporkan Stranger", callback_data="report_open")
     ]])
@@ -295,8 +296,20 @@ async def cmd_premium(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     is_premium = data and data.get("is_premium")
 
     if is_premium:
+        until = data.get("premium_until")
+        if until:
+            # Pastikan timezone-aware
+            from datetime import timezone
+            if until.tzinfo is None:
+                until = until.replace(tzinfo=timezone.utc)
+            until_str = until.strftime("%d %b %Y")
+            expiry_info = f"📅 Aktif hingga: *{until_str}*"
+        else:
+            expiry_info = "📅 Masa aktif: *Permanen*"
+
         await update.message.reply_text(
             "⭐ *Kamu sudah Premium!*\n\n"
+            f"{expiry_info}\n\n"
             "Fitur aktif:\n"
             "• 🔍 Gender Filter — /filter\n"
             "• 🏷 Interest Tags — /profile\n"
@@ -312,7 +325,8 @@ async def cmd_premium(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "• 🏷 *Interest Tags* — match berdasarkan topik\n"
             "• 👻 *Invisible Mode* — hilang dari statistik global\n"
             "• 🚀 *Priority Queue* — dapat match lebih cepat\n\n"
-            "Untuk upgrade, hubungi admin bot ini.",
+            "💰 *Harga:* Rp50.000 / bulan\n\n"
+            f"Untuk upgrade, hubungi @{OWNER_USERNAME}",
             parse_mode=ParseMode.MARKDOWN
         )
 
@@ -329,12 +343,25 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     status_str = status_map.get(data["status"], data["status"])
     gender_display = {"male": "👨 Cowok", "female": "👩 Cewek"}.get(data.get("gender") or "", "❓")
 
+    # Info premium + masa aktif
+    if data.get("is_premium"):
+        until = data.get("premium_until")
+        if until:
+            from datetime import timezone
+            if until.tzinfo is None:
+                until = until.replace(tzinfo=timezone.utc)
+            premium_str = f"⭐ Ya (hingga {until.strftime('%d %b %Y')})"
+        else:
+            premium_str = "⭐ Ya (Permanen)"
+    else:
+        premium_str = "Tidak"
+
     await update.message.reply_text(
         f"📊 *Statistikmu:*\n"
         f"Total chat: *{data['total_chats']}*\n"
         f"Status: {status_str}\n"
         f"Gender: {gender_display}\n"
-        f"Premium: {'⭐ Ya' if data.get('is_premium') else 'Tidak'}\n\n"
+        f"Premium: {premium_str}\n\n"
         f"🌍 *Global:*\n"
         f"Total user: *{total_users}*\n"
         f"Chat aktif: *{active_chats}*",
@@ -364,19 +391,49 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ── Admin Commands ────────────────────────────────────
 
 async def cmd_addpremium(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """
+    Usage:
+      /addpremium <user_id>        → 30 hari (default)
+      /addpremium <user_id> <days> → custom hari
+    """
     if update.effective_user.id != OWNER_ID:
         return
 
     if not ctx.args:
-        await update.message.reply_text("Usage: /addpremium <user_id>")
+        await update.message.reply_text(
+            "Usage:\n"
+            "/addpremium <user_id>\n"
+            "/addpremium <user_id> <hari>\n\n"
+            "Contoh: /addpremium 123456789 30"
+        )
         return
 
     try:
         target_id = int(ctx.args[0])
-        set_premium(target_id, True)
-        await update.message.reply_text(f"✅ User {target_id} sekarang Premium.")
+        days = int(ctx.args[1]) if len(ctx.args) > 1 else 30
+        set_premium(target_id, True, days=days)
+
+        from datetime import datetime, timedelta, timezone
+        until = datetime.now(timezone.utc) + timedelta(days=days)
+        until_str = until.strftime("%d %b %Y")
+
+        await update.message.reply_text(
+            f"✅ User `{target_id}` sekarang *Premium* selama *{days} hari*.\n"
+            f"Berakhir: {until_str}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        await safe_send(ctx.bot, target_id,
+            f"🎉 *Selamat! Kamu sekarang Premium!*\n\n"
+            f"Masa aktif: *{days} hari* (hingga {until_str})\n\n"
+            "Fitur yang tersedia:\n"
+            "• 🔍 Gender Filter — /filter\n"
+            "• 🏷 Interest Tags — /profile\n"
+            "• 👻 Invisible Mode — /invisible\n"
+            "• 🚀 Priority Queue (otomatis aktif)",
+            parse_mode=ParseMode.MARKDOWN
+        )
     except ValueError:
-        await update.message.reply_text("❌ user_id harus angka.")
+        await update.message.reply_text("❌ Format salah. Contoh: /addpremium 123456789 30")
 
 
 async def cmd_removepremium(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -390,9 +447,54 @@ async def cmd_removepremium(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         target_id = int(ctx.args[0])
         set_premium(target_id, False)
-        await update.message.reply_text(f"✅ Premium user {target_id} dicabut.")
+        await update.message.reply_text(
+            f"✅ Premium user `{target_id}` dicabut.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        await safe_send(ctx.bot, target_id,
+            "⚠️ *Premium kamu telah dicabut.*\n\n"
+            "Hubungi admin jika ada pertanyaan.",
+            parse_mode=ParseMode.MARKDOWN
+        )
     except ValueError:
         await update.message.reply_text("❌ user_id harus angka.")
+
+
+# ── Scheduled Jobs ────────────────────────────────────
+
+async def daily_backup(context: ContextTypes.DEFAULT_TYPE):
+    """Job harian: backup DB + cek expired premium."""
+    # 1. Cek premium expired
+    expired = check_premium_expiry()
+    for uid in expired:
+        await safe_send(context.bot, uid,
+            "⚠️ *Premium kamu telah berakhir.*\n\n"
+            "Ketik /premium untuk memperpanjang.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    if expired:
+        await safe_send(context.bot, OWNER_ID,
+            f"ℹ️ Premium expired: {len(expired)} user\nID: {expired}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+    # 2. Backup database
+    try:
+        from src.backup import do_backup
+        import os
+        filepath = do_backup()
+        filename = os.path.basename(filepath)
+        with open(filepath, "rb") as f:
+            await context.bot.send_document(
+                chat_id=OWNER_ID,
+                document=f,
+                filename=filename,
+                caption=f"✅ Auto-backup: `{filename}`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+    except Exception as e:
+        logger.error(f"daily_backup error: {e}")
+        await safe_send(context.bot, OWNER_ID, f"❌ Auto-backup gagal: {e}")
 
 
 # ── Callback Handler ──────────────────────────────────
@@ -445,7 +547,6 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             editing.append(interest)
         ctx.user_data["editing_interests"] = editing
 
-        user_data = get_user(user.id)
         buttons = []
         row = []
         for i, itm in enumerate(INTERESTS_LIST):
@@ -513,15 +614,13 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ Tidak ada stranger yang bisa dilaporkan.")
             return
 
-        from src.db import add_report, get_pending_reports
+        from src.db import add_report
         add_report(reporter_id=user.id, reported_id=partner_id, reason=reason)
-
         await query.edit_message_text(
             "✅ *Laporan dikirim ke admin.*\n\nTerima kasih, admin akan meninjau segera.",
             parse_mode=ParseMode.MARKDOWN,
         )
 
-        # Notif ke owner
         reporter_display = f"@{user.username}" if user.username else str(user.id)
         await safe_send(ctx.bot, OWNER_ID,
             f"🚨 *Laporan Baru!*\n\n"
@@ -549,7 +648,6 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("Ketik /start dulu.")
         return
 
-    # ── Ban check ─────────────────────────────────────
     from src.db import is_banned
     if is_banned(user.id):
         await msg.reply_text(
@@ -642,7 +740,6 @@ async def cmd_restore(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
         return
 
-    # Harus reply ke file JSON yang dikirim
     msg = update.message
     if not msg.reply_to_message or not msg.reply_to_message.document:
         await msg.reply_text(
@@ -688,7 +785,6 @@ REPORT_REASONS = [
 
 
 async def cmd_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Muncul otomatis via tombol inline di pesan giliran, bukan command langsung."""
     user = update.effective_user
     data = get_user(user.id)
 
@@ -709,7 +805,6 @@ async def cmd_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def _send_report_button(bot, chat_id: int):
-    """Kirim tombol Laporkan ke user yang sedang chat."""
     keyboard = InlineKeyboardMarkup([[
         InlineKeyboardButton("🚨 Laporkan Stranger", callback_data="report_open")
     ]])
@@ -762,7 +857,6 @@ async def cmd_ban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         target_id = int(ctx.args[0])
         duration  = ctx.args[1].lower() if len(ctx.args) > 1 else "permanent"
 
-        # Putuskan chat kalau lagi chatting
         target_data = get_user(target_id)
         if target_data and target_data["status"] == "chatting":
             await disconnect_pair(ctx.bot, target_id, target_data, notify_self=False, notify_partner=True)
@@ -831,15 +925,32 @@ async def cmd_userinfo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not info:
             await update.message.reply_text("❌ User tidak ditemukan.")
             return
-        ban_status = "🔨 Di-ban permanen" if info.get("is_banned") and not info.get("ban_until") \
-            else f"🔨 Di-ban sampai {info['ban_until']}" if info.get("is_banned") \
+
+        ban_status = (
+            "🔨 Di-ban permanen" if info.get("is_banned") and not info.get("ban_until")
+            else f"🔨 Di-ban sampai {info['ban_until']}" if info.get("is_banned")
             else "✅ Tidak di-ban"
+        )
+
+        if info.get("is_premium"):
+            until = info.get("premium_until")
+            if until:
+                from datetime import timezone
+                if until.tzinfo is None:
+                    until = until.replace(tzinfo=timezone.utc)
+                premium_str = f"⭐ Ya (hingga {until.strftime('%d %b %Y')})"
+            else:
+                premium_str = "⭐ Ya (Permanen)"
+        else:
+            premium_str = "Tidak"
+
         await update.message.reply_text(
             f"👤 *User Info:*\n"
             f"ID: `{info['user_id']}`\n"
             f"Username: @{info.get('username', '-')}\n"
             f"Total chat: {info.get('total_chats', 0)}\n"
             f"Peringatan: {info.get('warnings', 0)}\n"
+            f"Premium: {premium_str}\n"
             f"Status ban: {ban_status}",
             parse_mode=ParseMode.MARKDOWN,
         )
