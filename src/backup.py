@@ -21,15 +21,22 @@ def do_backup() -> str:
         conn = get_conn()
         cur = conn.cursor()
 
-        cur.execute("SELECT user_id, username, total_chats, gender, interests, gender_filter, is_premium, is_invisible, created_at FROM users")
+        # Tambah premium_until, warnings, is_banned, ban_until
+        cur.execute("""
+            SELECT user_id, username, total_chats, gender, interests,
+                   gender_filter, is_premium, premium_until, is_invisible,
+                   warnings, is_banned, ban_until, created_at
+            FROM users
+        """)
         cols = [d[0] for d in cur.description]
         users = []
         for row in cur.fetchall():
             d = dict(zip(cols, row))
-            # convert datetime to string
-            if d.get("created_at"):
-                d["created_at"] = d["created_at"].isoformat()
-            # convert list
+            # convert datetime ke string
+            for field in ("created_at", "premium_until", "ban_until"):
+                if d.get(field):
+                    d[field] = d[field].isoformat()
+            # pastiin interests tidak None
             if d.get("interests") is None:
                 d["interests"] = []
             users.append(d)
@@ -69,9 +76,17 @@ def do_restore(filepath: str) -> int:
 
         restored = 0
         for u in users:
+            # Parse balik string ISO ke datetime kalau ada
+            premium_until = u.get("premium_until")
+            ban_until     = u.get("ban_until")
+
             cur.execute("""
-                INSERT INTO users (user_id, username, total_chats, gender, interests, gender_filter, is_premium, is_invisible)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO users (
+                    user_id, username, total_chats, gender, interests,
+                    gender_filter, is_premium, premium_until, is_invisible,
+                    warnings, is_banned, ban_until
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (user_id) DO UPDATE SET
                     username      = EXCLUDED.username,
                     total_chats   = EXCLUDED.total_chats,
@@ -79,7 +94,11 @@ def do_restore(filepath: str) -> int:
                     interests     = EXCLUDED.interests,
                     gender_filter = EXCLUDED.gender_filter,
                     is_premium    = EXCLUDED.is_premium,
-                    is_invisible  = EXCLUDED.is_invisible
+                    premium_until = EXCLUDED.premium_until,
+                    is_invisible  = EXCLUDED.is_invisible,
+                    warnings      = EXCLUDED.warnings,
+                    is_banned     = EXCLUDED.is_banned,
+                    ban_until     = EXCLUDED.ban_until
             """, (
                 u["user_id"],
                 u.get("username", "anon"),
@@ -88,7 +107,11 @@ def do_restore(filepath: str) -> int:
                 u.get("interests") or [],
                 u.get("gender_filter"),
                 u.get("is_premium", False),
+                premium_until,
                 u.get("is_invisible", False),
+                u.get("warnings", 0),
+                u.get("is_banned", False),
+                ban_until,
             ))
             restored += 1
 
