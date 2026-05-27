@@ -192,6 +192,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "▸ /stop — Akhiri chat\n"
         "▸ /profile — Atur profil & gender\n"
         "▸ /stats — Statistik\n"
+        "▸ /myid — Lihat ID Telegram kamu\n"
         "▸ /premium — Info VIP\n"
         "▸ /help — Bantuan lengkap\n\n"
         "Ketik /find untuk mulai!",
@@ -478,13 +479,24 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "▸ /next — Skip ke stranger lain\n"
         "▸ /stop — Akhiri chat / batalkan pencarian\n"
         "▸ /profile — Atur gender & interests\n"
-        "▸ /stats — Statistik kamu & global\n\n"
+        "▸ /stats — Statistik kamu & global\n"
+        "▸ /myid — Lihat ID Telegram kamu\n\n"
         "*VIP 💎:*\n"
         "▸ /filter — Filter gender stranger\n"
         "▸ /invisible — Toggle invisible mode\n"
         "▸ /premium — Info & fitur VIP\n\n"
         "💡 Semua pesan dikirim anonim.\n"
         "Foto, stiker, voice note semua support.",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
+async def cmd_myid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    await update.message.reply_text(
+        f"🪪 *ID Telegram Kamu:*\n\n"
+        f"`{user.id}`\n\n"
+        "Tap angka di atas untuk copy.",
         parse_mode=ParseMode.MARKDOWN
     )
 
