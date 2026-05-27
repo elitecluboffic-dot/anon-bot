@@ -9,7 +9,7 @@ from src.db import init_db
 from src.handlers import (
     cmd_start, cmd_find, cmd_next, cmd_stop,
     cmd_profile, cmd_filter, cmd_invisible,
-    cmd_premium, cmd_stats, cmd_help,
+    cmd_premium, cmd_stats, cmd_help, cmd_myid,
     cmd_addpremium, cmd_removepremium,
     cmd_backup, cmd_restore,
     cmd_warn, cmd_ban, cmd_unban, cmd_userinfo, cmd_reports,
@@ -17,13 +17,11 @@ from src.handlers import (
 )
 
 load_dotenv()
-
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
-
 OWNER_ID = int(os.getenv("OWNER_ID", 0))
 
 
@@ -52,7 +50,6 @@ def main():
         raise ValueError("BOT_TOKEN tidak ditemukan!")
 
     init_db()
-
     app = ApplicationBuilder().token(token).build()
 
     # ── Scheduler ─────────────────────────────────────
@@ -69,6 +66,7 @@ def main():
     app.add_handler(CommandHandler("premium",       cmd_premium))
     app.add_handler(CommandHandler("stats",         cmd_stats))
     app.add_handler(CommandHandler("help",          cmd_help))
+    app.add_handler(CommandHandler("myid",          cmd_myid))
 
     # ── Admin Commands ─────────────────────────────────
     app.add_handler(CommandHandler("addpremium",    cmd_addpremium))
@@ -84,7 +82,6 @@ def main():
     # ── Callbacks & Messages ───────────────────────────
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
-
     app.add_error_handler(error_handler)
 
     logger.info("Bot Anonymous Chat berjalan...")
