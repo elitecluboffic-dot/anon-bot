@@ -34,21 +34,22 @@ def init_db():
         cur = conn.cursor()
         cur.execute("""
             CREATE TABLE IF NOT EXISTS users (
-                user_id        BIGINT PRIMARY KEY,
-                username       TEXT,
-                status         TEXT DEFAULT 'idle',
-                partner_id     BIGINT DEFAULT NULL,
-                total_chats    INTEGER DEFAULT 0,
-                gender         TEXT DEFAULT NULL,
-                interests      TEXT[] DEFAULT '{}',
-                gender_filter  TEXT DEFAULT NULL,
-                is_premium     BOOLEAN DEFAULT FALSE,
-                premium_until  TIMESTAMPTZ DEFAULT NULL,
-                is_invisible   BOOLEAN DEFAULT FALSE,
-                warnings       INTEGER DEFAULT 0,
-                is_banned      BOOLEAN DEFAULT FALSE,
-                ban_until      TIMESTAMPTZ DEFAULT NULL,
-                created_at     TIMESTAMPTZ DEFAULT NOW()
+                user_id         BIGINT PRIMARY KEY,
+                username        TEXT,
+                status          TEXT DEFAULT 'idle',
+                partner_id      BIGINT DEFAULT NULL,
+                last_partner_id BIGINT DEFAULT NULL,
+                total_chats     INTEGER DEFAULT 0,
+                gender          TEXT DEFAULT NULL,
+                interests       TEXT[] DEFAULT '{}',
+                gender_filter   TEXT DEFAULT NULL,
+                is_premium      BOOLEAN DEFAULT FALSE,
+                premium_until   TIMESTAMPTZ DEFAULT NULL,
+                is_invisible    BOOLEAN DEFAULT FALSE,
+                warnings        INTEGER DEFAULT 0,
+                is_banned       BOOLEAN DEFAULT FALSE,
+                ban_until       TIMESTAMPTZ DEFAULT NULL,
+                created_at      TIMESTAMPTZ DEFAULT NOW()
             );
         """)
         cur.execute("""
@@ -61,11 +62,26 @@ def init_db():
                 interests      TEXT[] DEFAULT '{}'
             );
         """)
-        # Pastikan kolom baru ada untuk database lama
-        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS premium_until TIMESTAMPTZ DEFAULT NULL;")
-        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS warnings INTEGER DEFAULT 0;")
-        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE;")
-        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS ban_until TIMESTAMPTZ DEFAULT NULL;")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS reports (
+                id          SERIAL PRIMARY KEY,
+                reporter_id BIGINT NOT NULL,
+                reported_id BIGINT NOT NULL,
+                reason      TEXT,
+                status      TEXT DEFAULT 'pending',
+                created_at  TIMESTAMPTZ DEFAULT NOW()
+            );
+        """)
+        # Migrasi kolom baru untuk database lama
+        migrations = [
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS premium_until TIMESTAMPTZ DEFAULT NULL;",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS warnings INTEGER DEFAULT 0;",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE;",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS ban_until TIMESTAMPTZ DEFAULT NULL;",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_partner_id BIGINT DEFAULT NULL;",
+        ]
+        for sql in migrations:
+            cur.execute(sql)
         conn.commit()
         logger.info("DB initialized")
     except Exception as e:
@@ -124,6 +140,40 @@ def set_status(user_id: int, status: str, partner_id=None):
         release(conn)
 
 
+def set_last_partner(user_id: int, partner_id: int):
+    """Simpan partner terakhir sebelum disconnect, buat keperluan laporan."""
+    conn = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE users SET last_partner_id = %s WHERE user_id = %s",
+            (partner_id, user_id)
+        )
+        conn.commit()
+    except Exception as e:
+        logger.error(f"set_last_partner: {e}")
+    finally:
+        release(conn)
+
+
+def clear_last_partner(user_id: int):
+    """Hapus last_partner_id setelah laporan dikirim atau match baru ditemukan."""
+    conn = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE users SET last_partner_id = NULL WHERE user_id = %s",
+            (user_id,)
+        )
+        conn.commit()
+    except Exception as e:
+        logger.error(f"clear_last_partner: {e}")
+    finally:
+        release(conn)
+
+
 def update_profile(user_id: int, gender: str = None, interests: list = None):
     conn = None
     try:
@@ -168,11 +218,6 @@ def set_invisible(user_id: int, invisible: bool):
 
 
 def set_premium(user_id: int, active: bool, days: int = 30):
-    """
-    Set premium user.
-    active=True  → aktifkan premium selama `days` hari (default 30)
-    active=False → cabut premium
-    """
     conn = None
     try:
         conn = get_conn()
@@ -197,18 +242,12 @@ def set_premium(user_id: int, active: bool, days: int = 30):
 
 
 def check_premium_expiry() -> list:
-    """
-    Cabut premium yang sudah expired.
-    Dipanggil otomatis setiap hari via job_queue.
-    Return: list user_id yang premiumnya dicabut.
-    """
     conn = None
     try:
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc)
         conn = get_conn()
         cur = conn.cursor()
-        # Ambil dulu siapa yang expired
         cur.execute("""
             SELECT user_id FROM users
             WHERE is_premium = TRUE
@@ -291,12 +330,6 @@ def leave_queue(user_id: int):
 
 
 def pop_match(seeker: dict):
-    """
-    Cari match terbaik:
-    - Premium diutamakan (head-start 10 menit di joined_at)
-    - Cocokkan gender_filter kedua arah
-    - Interest overlap diutamakan
-    """
     conn = None
     try:
         conn = get_conn()
@@ -380,16 +413,6 @@ def add_report(reporter_id: int, reported_id: int, reason: str):
         conn = get_conn()
         cur = conn.cursor()
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS reports (
-                id          SERIAL PRIMARY KEY,
-                reporter_id BIGINT NOT NULL,
-                reported_id BIGINT NOT NULL,
-                reason      TEXT,
-                status      TEXT DEFAULT 'pending',
-                created_at  TIMESTAMPTZ DEFAULT NOW()
-            );
-        """)
-        cur.execute("""
             INSERT INTO reports (reporter_id, reported_id, reason)
             VALUES (%s, %s, %s)
         """, (reporter_id, reported_id, reason))
@@ -434,7 +457,6 @@ def resolve_report(report_id: int):
 
 
 def add_warning(user_id: int) -> int:
-    """Tambah warning ke user, return jumlah warning sekarang."""
     conn = None
     try:
         conn = get_conn()
@@ -454,7 +476,6 @@ def add_warning(user_id: int) -> int:
 
 
 def ban_user(user_id: int, until=None, permanent: bool = False):
-    """Ban user. until = datetime object untuk ban sementara, permanent = True untuk permanen."""
     conn = None
     try:
         conn = get_conn()
@@ -493,7 +514,6 @@ def unban_user(user_id: int):
 
 
 def is_banned(user_id: int) -> bool:
-    """Cek apakah user masih kena ban."""
     conn = None
     try:
         conn = get_conn()
@@ -504,7 +524,6 @@ def is_banned(user_id: int) -> bool:
             return False
         if not row["is_banned"]:
             return False
-        # Cek apakah ban sementara sudah habis
         if row["ban_until"] is not None:
             from datetime import datetime, timezone
             if datetime.now(timezone.utc) > row["ban_until"]:
@@ -534,4 +553,4 @@ def get_user_modinfo(user_id: int):
         logger.error(f"get_user_modinfo: {e}")
         return None
     finally:
-        release(conn)
+        release(conn
