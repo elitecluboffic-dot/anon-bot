@@ -789,32 +789,44 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("❌ Error. Ketik /find untuk cari lagi.")
         return
 
+    # Label pengirim sesuai tier
+    sender_tier = get_tier(data)
+    if sender_tier == "owner":
+        label      = "👑 *Pemilik Bot:*"
+        label_send = "👑 *Pemilik Bot*"
+    elif sender_tier == "vip":
+        label      = "💎 *Stranger VIP:*"
+        label_send = "💎 *Stranger VIP*"
+    else:
+        label      = "👤 *Stranger:*"
+        label_send = "👤 *Stranger*"
+
     try:
         if msg.text:
-            await ctx.bot.send_message(partner_id, f"👤 *Stranger:*\n{msg.text}", parse_mode=ParseMode.MARKDOWN)
+            await ctx.bot.send_message(partner_id, f"{label}\n{msg.text}", parse_mode=ParseMode.MARKDOWN)
         elif msg.sticker:
-            await ctx.bot.send_message(partner_id, "👤 *Stranger* mengirim stiker:", parse_mode=ParseMode.MARKDOWN)
+            await ctx.bot.send_message(partner_id, f"{label_send} mengirim stiker:", parse_mode=ParseMode.MARKDOWN)
             await ctx.bot.send_sticker(partner_id, msg.sticker.file_id)
         elif msg.photo:
-            cap = f"👤 *Stranger:*\n{msg.caption}" if msg.caption else "👤 *Stranger* mengirim foto:"
+            cap = f"{label}\n{msg.caption}" if msg.caption else f"{label_send} mengirim foto:"
             await ctx.bot.send_photo(partner_id, msg.photo[-1].file_id, caption=cap, parse_mode=ParseMode.MARKDOWN)
         elif msg.video:
-            cap = f"👤 *Stranger:*\n{msg.caption}" if msg.caption else "👤 *Stranger* mengirim video:"
+            cap = f"{label}\n{msg.caption}" if msg.caption else f"{label_send} mengirim video:"
             await ctx.bot.send_video(partner_id, msg.video.file_id, caption=cap, parse_mode=ParseMode.MARKDOWN)
         elif msg.voice:
-            await ctx.bot.send_message(partner_id, "👤 *Stranger* mengirim voice note:", parse_mode=ParseMode.MARKDOWN)
+            await ctx.bot.send_message(partner_id, f"{label_send} mengirim voice note:", parse_mode=ParseMode.MARKDOWN)
             await ctx.bot.send_voice(partner_id, msg.voice.file_id)
         elif msg.audio:
-            await ctx.bot.send_message(partner_id, "👤 *Stranger* mengirim audio:", parse_mode=ParseMode.MARKDOWN)
+            await ctx.bot.send_message(partner_id, f"{label_send} mengirim audio:", parse_mode=ParseMode.MARKDOWN)
             await ctx.bot.send_audio(partner_id, msg.audio.file_id)
         elif msg.document:
-            cap = f"👤 *Stranger:*\n{msg.caption}" if msg.caption else "👤 *Stranger* mengirim file:"
+            cap = f"{label}\n{msg.caption}" if msg.caption else f"{label_send} mengirim file:"
             await ctx.bot.send_document(partner_id, msg.document.file_id, caption=cap, parse_mode=ParseMode.MARKDOWN)
         elif msg.video_note:
-            await ctx.bot.send_message(partner_id, "👤 *Stranger* mengirim video note:", parse_mode=ParseMode.MARKDOWN)
+            await ctx.bot.send_message(partner_id, f"{label_send} mengirim video note:", parse_mode=ParseMode.MARKDOWN)
             await ctx.bot.send_video_note(partner_id, msg.video_note.file_id)
         elif msg.location:
-            await ctx.bot.send_message(partner_id, "👤 *Stranger* mengirim lokasi:", parse_mode=ParseMode.MARKDOWN)
+            await ctx.bot.send_message(partner_id, f"{label_send} mengirim lokasi:", parse_mode=ParseMode.MARKDOWN)
             await ctx.bot.send_location(partner_id, msg.location.latitude, msg.location.longitude)
         else:
             await msg.reply_text("❌ Jenis pesan ini belum didukung.")
