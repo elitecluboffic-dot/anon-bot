@@ -62,6 +62,13 @@ async def try_match(bot, user_id: int):
         "/stop — akhiri chat",
         parse_mode=ParseMode.MARKDOWN
     )
+
+    # Tombol laporkan muncul otomatis
+    report_keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🚨 Laporkan Stranger", callback_data="report_open")
+    ]])
+    await safe_send(bot, user_id, "Merasa tidak nyaman? Tap tombol di bawah.", reply_markup=report_keyboard)
+    await safe_send(bot, partner_id, "Merasa tidak nyaman? Tap tombol di bawah.", reply_markup=report_keyboard)
     return True
 
 
@@ -476,6 +483,59 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             display = {"male": "👨 Cowok", "female": "👩 Cewek"}.get(val, val)
             await query.edit_message_text(f"✅ Filter gender: *{display}*", parse_mode=ParseMode.MARKDOWN)
 
+    # ── Report ────────────────────────────────────────
+    elif data == "report_open":
+        user_data = get_user(user.id)
+        if not user_data or user_data["status"] != "chatting":
+            await query.edit_message_text("⚠️ Kamu tidak sedang dalam chat.")
+            return
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(label, callback_data=f"report_{code}")]
+            for label, code in REPORT_REASONS
+        ] + [[InlineKeyboardButton("❌ Batal", callback_data="report_cancel")]])
+        await query.edit_message_text(
+            "🚨 *Laporkan Stranger*\n\nPilih alasan laporan:",
+            reply_markup=keyboard,
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+    elif data == "report_cancel":
+        await query.edit_message_text("✅ Laporan dibatalkan.")
+
+    elif data.startswith("report_"):
+        reason = data[7:]
+        user_data = get_user(user.id)
+        if not user_data or user_data["status"] != "chatting":
+            await query.edit_message_text("⚠️ Kamu tidak sedang dalam chat.")
+            return
+        partner_id = user_data.get("partner_id")
+        if not partner_id:
+            await query.edit_message_text("❌ Tidak ada stranger yang bisa dilaporkan.")
+            return
+
+        from src.db import add_report, get_pending_reports
+        add_report(reporter_id=user.id, reported_id=partner_id, reason=reason)
+
+        await query.edit_message_text(
+            "✅ *Laporan dikirim ke admin.*\n\nTerima kasih, admin akan meninjau segera.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+        # Notif ke owner
+        reporter_display = f"@{user.username}" if user.username else str(user.id)
+        await safe_send(ctx.bot, OWNER_ID,
+            f"🚨 *Laporan Baru!*\n\n"
+            f"Pelapor: {reporter_display} (`{user.id}`)\n"
+            f"Dilaporkan: `{partner_id}`\n"
+            f"Alasan: *{reason}*\n\n"
+            f"Tindakan:\n"
+            f"/warn {partner_id}\n"
+            f"/ban {partner_id} 7d\n"
+            f"/ban {partner_id} permanent\n"
+            f"/userinfo {partner_id}",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
 
 # ── Message Forwarder ─────────────────────────────────
 
@@ -487,6 +547,16 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not data:
         upsert_user(user.id, user.username or user.first_name)
         await msg.reply_text("Ketik /start dulu.")
+        return
+
+    # ── Ban check ─────────────────────────────────────
+    from src.db import is_banned
+    if is_banned(user.id):
+        await msg.reply_text(
+            "🔨 *Kamu sedang di-ban* dan tidak bisa menggunakan bot ini.\n"
+            "Hubungi admin jika ada keberatan.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
         return
 
     if data["status"] != "chatting":
@@ -603,3 +673,195 @@ async def cmd_restore(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         await msg.reply_text(f"❌ Restore gagal: {e}")
+
+
+# ── Report System ─────────────────────────────────────
+
+REPORT_REASONS = [
+    ("🔞 Pelecehan seksual",  "pelecehan"),
+    ("😡 Pembullyan",         "bullying"),
+    ("🤬 Kata kasar/SARA",    "kasar"),
+    ("🔗 Spam/iklan",         "spam"),
+    ("⚠️ Konten berbahaya",   "berbahaya"),
+    ("📛 Lainnya",            "lainnya"),
+]
+
+
+async def cmd_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Muncul otomatis via tombol inline di pesan giliran, bukan command langsung."""
+    user = update.effective_user
+    data = get_user(user.id)
+
+    if not data or data["status"] != "chatting":
+        await update.message.reply_text("⚠️ Kamu tidak sedang dalam chat.")
+        return
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(label, callback_data=f"report_{code}")]
+        for label, code in REPORT_REASONS
+    ] + [[InlineKeyboardButton("❌ Batal", callback_data="report_cancel")]])
+
+    await update.message.reply_text(
+        "🚨 *Laporkan Stranger*\n\nPilih alasan laporan:",
+        reply_markup=keyboard,
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def _send_report_button(bot, chat_id: int):
+    """Kirim tombol Laporkan ke user yang sedang chat."""
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🚨 Laporkan Stranger", callback_data="report_open")
+    ]])
+    await safe_send(bot, chat_id, "Merasa tidak nyaman? Tap tombol di bawah.", reply_markup=keyboard)
+
+
+# ── Moderation Commands (Admin) ───────────────────────
+
+async def cmd_warn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        return
+    if not ctx.args:
+        await update.message.reply_text("Usage: /warn <user_id>")
+        return
+    try:
+        from src.db import add_warning
+        target_id = int(ctx.args[0])
+        count = add_warning(target_id)
+        await update.message.reply_text(
+            f"⚠️ Peringatan dikirim ke user `{target_id}`.\n"
+            f"Total peringatan: *{count}*",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        await safe_send(ctx.bot, target_id,
+            f"⚠️ *Peringatan dari Admin*\n\n"
+            f"Kamu mendapat peringatan ke-*{count}* karena melanggar aturan.\n"
+            f"Ulangi lagi dan kamu akan di-ban.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    except ValueError:
+        await update.message.reply_text("❌ user_id harus angka.")
+
+
+async def cmd_ban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        return
+    if not ctx.args:
+        await update.message.reply_text(
+            "Usage:\n"
+            "/ban <user_id> permanent\n"
+            "/ban <user_id> 7d\n"
+            "/ban <user_id> 1m\n"
+            "/ban <user_id> 1y"
+        )
+        return
+    try:
+        from src.db import ban_user
+        from datetime import datetime, timedelta, timezone
+
+        target_id = int(ctx.args[0])
+        duration  = ctx.args[1].lower() if len(ctx.args) > 1 else "permanent"
+
+        # Putuskan chat kalau lagi chatting
+        target_data = get_user(target_id)
+        if target_data and target_data["status"] == "chatting":
+            await disconnect_pair(ctx.bot, target_id, target_data, notify_self=False, notify_partner=True)
+
+        if duration == "permanent":
+            ban_user(target_id, permanent=True)
+            label = "permanen"
+            until_str = "Permanen"
+        else:
+            now = datetime.now(timezone.utc)
+            if duration.endswith("d"):
+                until = now + timedelta(days=int(duration[:-1]))
+                label = f"{duration[:-1]} hari"
+            elif duration.endswith("m"):
+                until = now + timedelta(days=int(duration[:-1]) * 30)
+                label = f"{duration[:-1]} bulan"
+            elif duration.endswith("y"):
+                until = now + timedelta(days=int(duration[:-1]) * 365)
+                label = f"{duration[:-1]} tahun"
+            else:
+                await update.message.reply_text("❌ Format durasi salah. Gunakan: 7d / 1m / 1y / permanent")
+                return
+            ban_user(target_id, until=until)
+            until_str = until.strftime("%d %b %Y %H:%M UTC")
+
+        await update.message.reply_text(
+            f"🔨 User `{target_id}` di-ban *{label}*.\nBerakhir: {until_str}",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        await safe_send(ctx.bot, target_id,
+            f"🔨 *Kamu telah di-ban* selama *{label}*.\n\n"
+            "Alasan: Melanggar aturan komunitas.\n"
+            f"Berakhir: {until_str}",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    except (ValueError, IndexError):
+        await update.message.reply_text("❌ Format salah.")
+
+
+async def cmd_unban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        return
+    if not ctx.args:
+        await update.message.reply_text("Usage: /unban <user_id>")
+        return
+    try:
+        from src.db import unban_user
+        target_id = int(ctx.args[0])
+        unban_user(target_id)
+        await update.message.reply_text(f"✅ User `{target_id}` di-unban.", parse_mode=ParseMode.MARKDOWN)
+        await safe_send(ctx.bot, target_id, "✅ Ban kamu telah dicabut. Kamu bisa chat lagi.")
+    except ValueError:
+        await update.message.reply_text("❌ user_id harus angka.")
+
+
+async def cmd_userinfo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        return
+    if not ctx.args:
+        await update.message.reply_text("Usage: /userinfo <user_id>")
+        return
+    try:
+        from src.db import get_user_modinfo
+        target_id = int(ctx.args[0])
+        info = get_user_modinfo(target_id)
+        if not info:
+            await update.message.reply_text("❌ User tidak ditemukan.")
+            return
+        ban_status = "🔨 Di-ban permanen" if info.get("is_banned") and not info.get("ban_until") \
+            else f"🔨 Di-ban sampai {info['ban_until']}" if info.get("is_banned") \
+            else "✅ Tidak di-ban"
+        await update.message.reply_text(
+            f"👤 *User Info:*\n"
+            f"ID: `{info['user_id']}`\n"
+            f"Username: @{info.get('username', '-')}\n"
+            f"Total chat: {info.get('total_chats', 0)}\n"
+            f"Peringatan: {info.get('warnings', 0)}\n"
+            f"Status ban: {ban_status}",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    except ValueError:
+        await update.message.reply_text("❌ user_id harus angka.")
+
+
+async def cmd_reports(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        return
+    from src.db import get_pending_reports
+    reports = get_pending_reports()
+    if not reports:
+        await update.message.reply_text("✅ Tidak ada laporan pending.")
+        return
+    text = f"📋 *Laporan Pending ({len(reports)}):*\n\n"
+    for r in reports[:10]:
+        text += (
+            f"🆔 Report #{r['id']}\n"
+            f"Dilaporkan: `{r['reported_id']}` (@{r.get('reported_username', '-')})\n"
+            f"Alasan: {r['reason']}\n"
+            f"Waktu: {r['created_at'].strftime('%d %b %Y %H:%M')}\n\n"
+        )
+    text += "Tindakan: /warn /ban /unban /userinfo"
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
