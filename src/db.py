@@ -43,7 +43,11 @@ def init_db():
                 interests      TEXT[] DEFAULT '{}',
                 gender_filter  TEXT DEFAULT NULL,
                 is_premium     BOOLEAN DEFAULT FALSE,
+                premium_until  TIMESTAMPTZ DEFAULT NULL,
                 is_invisible   BOOLEAN DEFAULT FALSE,
+                warnings       INTEGER DEFAULT 0,
+                is_banned      BOOLEAN DEFAULT FALSE,
+                ban_until      TIMESTAMPTZ DEFAULT NULL,
                 created_at     TIMESTAMPTZ DEFAULT NOW()
             );
         """)
@@ -57,6 +61,11 @@ def init_db():
                 interests      TEXT[] DEFAULT '{}'
             );
         """)
+        # Pastikan kolom baru ada untuk database lama
+        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS premium_until TIMESTAMPTZ DEFAULT NULL;")
+        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS warnings INTEGER DEFAULT 0;")
+        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE;")
+        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS ban_until TIMESTAMPTZ DEFAULT NULL;")
         conn.commit()
         logger.info("DB initialized")
     except Exception as e:
@@ -158,15 +167,70 @@ def set_invisible(user_id: int, invisible: bool):
         release(conn)
 
 
-def set_premium(user_id: int, premium: bool):
+def set_premium(user_id: int, active: bool, days: int = 30):
+    """
+    Set premium user.
+    active=True  → aktifkan premium selama `days` hari (default 30)
+    active=False → cabut premium
+    """
     conn = None
     try:
         conn = get_conn()
         cur = conn.cursor()
-        cur.execute("UPDATE users SET is_premium = %s WHERE user_id = %s", (premium, user_id))
+        if active:
+            from datetime import datetime, timedelta, timezone
+            until = datetime.now(timezone.utc) + timedelta(days=days)
+            cur.execute(
+                "UPDATE users SET is_premium = TRUE, premium_until = %s WHERE user_id = %s",
+                (until, user_id)
+            )
+        else:
+            cur.execute(
+                "UPDATE users SET is_premium = FALSE, premium_until = NULL WHERE user_id = %s",
+                (user_id,)
+            )
         conn.commit()
     except Exception as e:
         logger.error(f"set_premium: {e}")
+    finally:
+        release(conn)
+
+
+def check_premium_expiry() -> list:
+    """
+    Cabut premium yang sudah expired.
+    Dipanggil otomatis setiap hari via job_queue.
+    Return: list user_id yang premiumnya dicabut.
+    """
+    conn = None
+    try:
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        conn = get_conn()
+        cur = conn.cursor()
+        # Ambil dulu siapa yang expired
+        cur.execute("""
+            SELECT user_id FROM users
+            WHERE is_premium = TRUE
+              AND premium_until IS NOT NULL
+              AND premium_until < %s
+        """, (now,))
+        rows = cur.fetchall()
+        expired_ids = [r[0] for r in rows]
+        if expired_ids:
+            cur.execute("""
+                UPDATE users
+                SET is_premium = FALSE, premium_until = NULL
+                WHERE is_premium = TRUE
+                  AND premium_until IS NOT NULL
+                  AND premium_until < %s
+            """, (now,))
+            conn.commit()
+            logger.info(f"Premium expired for {len(expired_ids)} users: {expired_ids}")
+        return expired_ids
+    except Exception as e:
+        logger.error(f"check_premium_expiry: {e}")
+        return []
     finally:
         release(conn)
 
@@ -376,11 +440,6 @@ def add_warning(user_id: int) -> int:
         conn = get_conn()
         cur = conn.cursor()
         cur.execute("""
-            ALTER TABLE users ADD COLUMN IF NOT EXISTS warnings INTEGER DEFAULT 0;
-            ALTER TABLE users ADD COLUMN IF NOT EXISTS ban_until TIMESTAMPTZ DEFAULT NULL;
-            ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE;
-        """)
-        cur.execute("""
             UPDATE users SET warnings = warnings + 1 WHERE user_id = %s
             RETURNING warnings
         """, (user_id,))
@@ -400,18 +459,16 @@ def ban_user(user_id: int, until=None, permanent: bool = False):
     try:
         conn = get_conn()
         cur = conn.cursor()
-        cur.execute("""
-            ALTER TABLE users ADD COLUMN IF NOT EXISTS ban_until TIMESTAMPTZ DEFAULT NULL;
-            ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE;
-        """)
         if permanent:
-            cur.execute("""
-                UPDATE users SET is_banned = TRUE, ban_until = NULL WHERE user_id = %s
-            """, (user_id,))
+            cur.execute(
+                "UPDATE users SET is_banned = TRUE, ban_until = NULL WHERE user_id = %s",
+                (user_id,)
+            )
         else:
-            cur.execute("""
-                UPDATE users SET is_banned = TRUE, ban_until = %s WHERE user_id = %s
-            """, (until, user_id))
+            cur.execute(
+                "UPDATE users SET is_banned = TRUE, ban_until = %s WHERE user_id = %s",
+                (until, user_id)
+            )
         conn.commit()
     except Exception as e:
         logger.error(f"ban_user: {e}")
@@ -424,9 +481,10 @@ def unban_user(user_id: int):
     try:
         conn = get_conn()
         cur = conn.cursor()
-        cur.execute("""
-            UPDATE users SET is_banned = FALSE, ban_until = NULL WHERE user_id = %s
-        """, (user_id,))
+        cur.execute(
+            "UPDATE users SET is_banned = FALSE, ban_until = NULL WHERE user_id = %s",
+            (user_id,)
+        )
         conn.commit()
     except Exception as e:
         logger.error(f"unban_user: {e}")
@@ -440,9 +498,7 @@ def is_banned(user_id: int) -> bool:
     try:
         conn = get_conn()
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute("""
-            SELECT is_banned, ban_until FROM users WHERE user_id = %s
-        """, (user_id,))
+        cur.execute("SELECT is_banned, ban_until FROM users WHERE user_id = %s", (user_id,))
         row = cur.fetchone()
         if not row:
             return False
@@ -468,7 +524,8 @@ def get_user_modinfo(user_id: int):
         conn = get_conn()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("""
-            SELECT user_id, username, warnings, is_banned, ban_until, total_chats
+            SELECT user_id, username, warnings, is_banned, ban_until,
+                   total_chats, is_premium, premium_until
             FROM users WHERE user_id = %s
         """, (user_id,))
         row = cur.fetchone()
