@@ -10,6 +10,7 @@ from src.db import (
     set_invisible, set_premium, increment_chats,
     join_queue, leave_queue, pop_match, queue_count, global_stats,
     check_premium_expiry,
+    set_last_partner, clear_last_partner,  # ← tambahan dari db.py
 )
 
 logger = logging.getLogger(__name__)
@@ -107,6 +108,10 @@ async def try_match(bot, user_id: int):
     increment_chats(user_id)
     increment_chats(partner_id)
 
+    # Bersihkan last_partner_id saat match baru ditemukan
+    clear_last_partner(user_id)
+    clear_last_partner(partner_id)
+
     partner = get_user(partner_id)
     user    = get_user(user_id)
 
@@ -135,6 +140,12 @@ async def try_match(bot, user_id: int):
 
 async def disconnect_pair(bot, user_id: int, user_data: dict, notify_self=True, notify_partner=True):
     partner_id = user_data.get("partner_id")
+
+    # Simpan last_partner_id sebelum di-clear, supaya bisa dilaporkan setelah disconnect
+    if partner_id:
+        set_last_partner(user_id, partner_id)
+        set_last_partner(partner_id, user_id)
+
     set_status(user_id, "idle", partner_id=None)
     if partner_id:
         set_status(partner_id, "idle", partner_id=None)
@@ -668,9 +679,15 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     elif data == "report_open":
         user_data = get_user(user.id)
-        if not user_data or user_data["status"] != "chatting":
+        if not user_data:
             await query.edit_message_text("⚠️ Kamu tidak sedang dalam chat.")
             return
+
+        # Bisa lapor saat chatting ATAU setelah disconnect (pakai last_partner_id)
+        if user_data["status"] != "chatting" and not user_data.get("last_partner_id"):
+            await query.edit_message_text("⚠️ Kamu tidak sedang dalam chat.")
+            return
+
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton(label, callback_data=f"report_{code}")]
             for label, code in REPORT_REASONS
@@ -684,19 +701,28 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif data == "report_cancel":
         await query.edit_message_text("✅ Laporan dibatalkan.")
 
-    elif data.startswith("report_"):
+    elif data.startswith("report_") and data != "report_open" and data != "report_cancel":
         reason = data[7:]
         user_data = get_user(user.id)
-        if not user_data or user_data["status"] != "chatting":
-            await query.edit_message_text("⚠️ Kamu tidak sedang dalam chat.")
+        if not user_data:
+            await query.edit_message_text("⚠️ Terjadi kesalahan.")
             return
-        partner_id = user_data.get("partner_id")
-        if not partner_id:
+
+        # Ambil partner_id: dari sesi aktif atau dari last_partner_id
+        if user_data["status"] == "chatting" and user_data.get("partner_id"):
+            partner_id = user_data["partner_id"]
+        elif user_data.get("last_partner_id"):
+            partner_id = user_data["last_partner_id"]
+        else:
             await query.edit_message_text("❌ Tidak ada stranger yang bisa dilaporkan.")
             return
 
         from src.db import add_report
         add_report(reporter_id=user.id, reported_id=partner_id, reason=reason)
+
+        # Bersihkan last_partner_id setelah laporan dikirim
+        clear_last_partner(user.id)
+
         await query.edit_message_text(
             "✅ *Laporan dikirim ke admin.*\n\nTerima kasih, admin akan meninjau segera.",
             parse_mode=ParseMode.MARKDOWN,
