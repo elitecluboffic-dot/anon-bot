@@ -12,6 +12,7 @@ from src.handlers import (
     cmd_premium, cmd_stats, cmd_help,
     cmd_addpremium, cmd_removepremium,
     cmd_backup, cmd_restore,
+    cmd_warn, cmd_ban, cmd_unban, cmd_userinfo, cmd_reports,
     handle_callback, handle_message, error_handler,
 )
 
@@ -27,7 +28,6 @@ OWNER_ID = int(os.getenv("OWNER_ID", 0))
 
 
 async def daily_backup(ctx):
-    """Job harian: backup otomatis dan kirim file ke owner."""
     try:
         from src.backup import do_backup
         filepath = do_backup()
@@ -55,11 +55,10 @@ def main():
 
     app = ApplicationBuilder().token(token).build()
 
-    # ── Scheduler: backup tiap hari jam 02:00 ────────
-    job_queue = app.job_queue
-    job_queue.run_daily(daily_backup, time=__import__("datetime").time(hour=2, minute=0))
+    # ── Scheduler ─────────────────────────────────────
+    app.job_queue.run_daily(daily_backup, time=__import__("datetime").time(hour=2, minute=0))
 
-    # ── Commands ──────────────────────────────────────
+    # ── User Commands ──────────────────────────────────
     app.add_handler(CommandHandler("start",         cmd_start))
     app.add_handler(CommandHandler("find",          cmd_find))
     app.add_handler(CommandHandler("next",          cmd_next))
@@ -71,13 +70,18 @@ def main():
     app.add_handler(CommandHandler("stats",         cmd_stats))
     app.add_handler(CommandHandler("help",          cmd_help))
 
-    # ── Admin ─────────────────────────────────────────
+    # ── Admin Commands ─────────────────────────────────
     app.add_handler(CommandHandler("addpremium",    cmd_addpremium))
     app.add_handler(CommandHandler("removepremium", cmd_removepremium))
     app.add_handler(CommandHandler("backup",        cmd_backup))
     app.add_handler(CommandHandler("restore",       cmd_restore))
+    app.add_handler(CommandHandler("warn",          cmd_warn))
+    app.add_handler(CommandHandler("ban",           cmd_ban))
+    app.add_handler(CommandHandler("unban",         cmd_unban))
+    app.add_handler(CommandHandler("userinfo",      cmd_userinfo))
+    app.add_handler(CommandHandler("reports",       cmd_reports))
 
-    # ── Callbacks & Messages ──────────────────────────
+    # ── Callbacks & Messages ───────────────────────────
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
