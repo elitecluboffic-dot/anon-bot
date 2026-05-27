@@ -553,4 +553,4 @@ def get_user_modinfo(user_id: int):
         logger.error(f"get_user_modinfo: {e}")
         return None
     finally:
-        release(conn
+        release(conn)
